@@ -1,0 +1,75 @@
+#include <Wire.h>
+#include "MPU9250.h"
+#include <BluetoothSerial.h>  // For Bluetooth communication
+
+MPU9250 mpu;
+BluetoothSerial SerialBT;  // Initialize Bluetooth
+
+// Kalman filter variables
+float kalmanX = 0, kalmanY = 0, kalmanZ = 0;
+float kGain = 0.4;  // Adjust Kalman gain for smoother filtering
+
+// Thresholds to filter out small vibrations
+const float noiseThreshold = 0.02;
+
+// Position tracking variables
+float velocityX = 0, velocityY = 0, velocityZ = 0;
+float positionX = 0, positionY = 0, positionZ = 0;
+const float deltaTime = 0.03;  // Loop delay in seconds
+const float driftFactor = 0.98;  // To reduce drift over time
+
+void setup() {
+    Serial.begin(115200);
+    SerialBT.begin("SmartPen");  // Bluetooth device name
+    Wire.begin();
+    
+    if (!mpu.setup(0x68)) {  // Initialize MPU9250
+        Serial.println("MPU9250 not detected!");
+        while (1);
+    }
+    Serial.println("MPU9250 Initialized");
+    delay(1000);  // Stabilization delay
+}
+
+float kalmanFilter(float newValue, float prevValue) {
+    return (kGain * newValue) + ((1 - kGain) * prevValue);
+}
+
+void updatePosition(float accX, float accY, float accZ) {
+    // Integrate acceleration to get velocity
+    velocityX = driftFactor * (velocityX + accX * deltaTime);
+    velocityY = driftFactor * (velocityY + accY * deltaTime);
+    velocityZ = driftFactor * (velocityZ + accZ * deltaTime);
+    
+    // Integrate velocity to get position
+    positionX += velocityX * deltaTime;
+    positionY += velocityY * deltaTime;
+    positionZ += velocityZ * deltaTime;
+}
+
+void sendData(float x, float y, float z) {
+    String data = "POS X:" + String(x, 4) + " Y:" + String(y, 4) + " Z:" + String(z, 4);
+    Serial.println(data);
+    SerialBT.println(data);
+}
+
+void loop() {
+    if (mpu.update()) {
+        // Read raw accelerometer data
+        float accX = mpu.getAccX();
+        float accY = mpu.getAccY();
+        float accZ = mpu.getAccZ();
+        
+        // Apply Kalman filtering for smoother values
+        kalmanX = kalmanFilter(accX, kalmanX);
+        kalmanY = kalmanFilter(accY, kalmanY);
+        kalmanZ = kalmanFilter(accZ, kalmanZ);
+        
+        // Filter out noise to avoid minor unintended movements
+        if (abs(kalmanX) > noiseThreshold || abs(kalmanY) > noiseThreshold || abs(kalmanZ) > noiseThreshold) {
+            updatePosition(kalmanX, kalmanY, kalmanZ);
+            sendData(positionX, positionY, positionZ);
+        }
+    }
+    delay(30);  // Optimized for real-time response
+}
