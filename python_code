@@ -1,0 +1,88 @@
+import numpy as np
+import cv2
+import serial
+import time
+import easyocr
+from scipy.interpolate import splprep, splev
+
+# Serial connection to ESP32
+SERIAL_PORT = "COM5"  # Change this to match your ESP32 port
+BAUD_RATE = 115200
+ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+
+easyocr_reader = easyocr.Reader(['en'])  # OCR Engine
+
+# Canvas settings
+canvas_width, canvas_height = 1200, 600
+canvas = np.ones((canvas_height, canvas_width), dtype=np.uint8) * 255
+trajectory = []  # Stores (x, y) coordinates for air writing
+
+def kalman_filter(new_value, prev_value, k_gain=0.3):
+    """Applies Kalman-like filtering for smoother movement."""
+    return (k_gain * new_value) + ((1 - k_gain) * prev_value)
+
+def get_imu_data():
+    """Reads and parses IMU data from ESP32 over Serial."""
+    try:
+        line = ser.readline().decode('utf-8').strip()
+        if line:
+            parts = line.split(',')
+            if len(parts) == 3:
+                return float(parts[0]), float(parts[1]), float(parts[2])
+    except Exception as e:
+        print("IMU Read Error:", e)
+    return None, None, None
+
+def map_imu_to_canvas(x, y):
+    """Maps IMU motion to canvas coordinates."""
+    scale_factor = 100  # Adjust scaling factor
+    return int(canvas_width // 2 + x * scale_factor), int(canvas_height // 2 - y * scale_factor)
+
+def draw_smooth_curve():
+    """Draws a smooth Bezier curve from the collected trajectory."""
+    if len(trajectory) > 3:
+        points = np.array(trajectory, dtype=np.float32)
+        tck, _ = splprep(points.T, s=2)
+        smoothed_points = splev(np.linspace(0, 1, len(points) * 2), tck)
+        for i in range(len(smoothed_points[0]) - 1):
+            cv2.line(canvas, 
+                     (int(smoothed_points[0][i]), int(smoothed_points[1][i])),
+                     (int(smoothed_points[0][i + 1]), int(smoothed_points[1][i + 1])),
+                     (0, 0, 0), 2)
+
+def recognize_text():
+    """Recognizes text from the canvas using OCR."""
+    gray = cv2.bitwise_not(canvas)
+    cv2.imwrite("temp.png", gray)
+    result = easyocr_reader.readtext("temp.png")
+    words = [text for _, text, _ in result]
+    recognized_text = " ".join(words)
+    print("Recognized Text:", recognized_text)
+
+def main():
+    global trajectory
+    while True:
+        imu_x, imu_y, imu_z = get_imu_data()
+        if imu_x is not None:
+            smooth_x = kalman_filter(imu_x, imu_x)
+            smooth_y = kalman_filter(imu_y, imu_y)
+            mapped_x, mapped_y = map_imu_to_canvas(smooth_x, smooth_y)
+            trajectory.append((mapped_x, mapped_y))
+            cv2.circle(canvas, (mapped_x, mapped_y), 2, (0, 0, 0), -1)
+            draw_smooth_curve()
+        
+        cv2.imshow("Air Writing", canvas)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('r'):
+            recognize_text()
+        elif key == ord('c'):
+            canvas[:] = 255
+            trajectory.clear()
+        elif key == ord('q'):
+            break
+
+    ser.close()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
